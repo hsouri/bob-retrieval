@@ -7,6 +7,7 @@ This repository is the official implementation of <strong>Image Retrieval</stron
 Version Control of Python libraries in environment.yml file. To create a virtual environment:
 ```
 conda env create -f environment.yml
+conda activate bb_retrieval
 ```
 ## Image Retrieval experiments
 
