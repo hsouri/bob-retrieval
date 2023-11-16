@@ -37,6 +37,8 @@ from utils import extract_features
 import pickle
 from PIL import Image, ImageFile
 import natsort
+# from torchvision.transforms import InterpolationMode
+# BICUBIC = InterpolationMode.BICUBIC
 
 import timm
 
@@ -204,6 +206,7 @@ def main_worker(gpu, ngpus_per_node, args):
     
         
     if args.pt_style == 'timm': # timm.list_models(pretrained=True)
+        # import ipdb; ipdb.set_trace()
         model = timm.create_model(args.arch,num_classes=0,pretrained=True)
 
     elif args.pt_style == 'moco':
@@ -257,8 +260,19 @@ def main_worker(gpu, ngpus_per_node, args):
             model = swin2_base_384_midas(pretrained=True)
         else:
             NotImplementedError('This model type does not exist for this pt style')
-   
-   
+    elif args.pt_style == 'sscd':
+
+        if args.arch == 'resnet50_im':
+            model = torch.jit.load("/cmlscratch/gowthami/moco-v3/pretrainedmodels/sscd_imagenet_mixup.torchscript.pt")
+        elif args.arch == 'resnet50_disc':
+            model = torch.jit.load("/cmlscratch/gowthami/moco-v3/pretrainedmodels/sscd_disc_large.torchscript.pt")
+        else:
+            NotImplementedError('This model type does not exist for SSCD')
+    elif args.pt_style == 'multigrain':
+        from models import multigrain
+        model = multigrain.get_multigrain('resnet50')
+        checkpoint = torch.load('pretrainedmodels/joint_3BAA_0.5.pth')
+        model.load_state_dict(checkpoint['model_state'])
 
     if '384' in args.arch:
         args.batch_size = 32
@@ -295,8 +309,31 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     cudnn.benchmark = True
+    # if args.pt_style == 'timm':
+    #     from timm.data import resolve_data_config
+    #     from timm.data.transforms_factory import create_transform
 
-    if "384" in args.arch:
+    #     config = resolve_data_config({}, model=model)
+    #     transform = create_transform(**config)
+    #     import ipdb; ipdb.set_trace()
+    
+    if "clip" in args.arch: 
+        transform = transforms.Compose([
+            transforms.Resize(224, interpolation=3),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+            ])
+    elif "384" in args.arch:
+        if args.pt_style == 'midas':
+            transform = transforms.Compose([
+                # transforms.ToPILImage(),
+                transforms.Resize(400, interpolation=3),
+                transforms.CenterCrop(384),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ])
+        else:
             transform = transforms.Compose([
                 # transforms.ToPILImage(),
                 transforms.Resize(400, interpolation=3),
@@ -310,25 +347,25 @@ def main_worker(gpu, ngpus_per_node, args):
                 transforms.Resize(460, interpolation=3),
                 transforms.CenterCrop(448),
                 transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
             ])
-    elif "256" in args.arch or args.pt_style == 'stablediffusion':
+    elif "256" in args.arch and args.pt_style == 'midas':
             transform = transforms.Compose([
                 # transforms.ToPILImage(),
                 transforms.Resize(256, interpolation=3),
                 transforms.CenterCrop(256),
                 transforms.ToTensor(),
-                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                transforms.Normalize([0.5],[0.5]),
             ])
     elif "swinv2_tiny" in args.arch:
-            transform = transforms.Compose([
+        transform = transforms.Compose([
                 # transforms.ToPILImage(),
                 transforms.Resize(224, interpolation=3),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
             ])
-        #elif 'vit' in args.arch or 'swin' in args.arch or args.pt_style in ['clip','vicregl','sscd','multigrain']:
+
     else:
             transform = transforms.Compose([
                 transforms.Resize(256, interpolation=3),
@@ -339,43 +376,43 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     if args.dataset in ['roxford5k', 'rparis6k']:
-        args.data_path = './datasets/revisitop/data/datasets/'
+        args.data_path = '/cmlscratch/gowthami/revisitop/data/datasets/'
 
         from utils import OxfordParisDataset
         dataset_values = OxfordParisDataset(args.data_path, args.dataset, split="train", transform=transform, imsize=args.imsize)
         dataset_query = OxfordParisDataset(args.data_path, args.dataset, split="query", transform=transform, imsize=args.imsize)
     elif args.dataset == 'INSTRE': 
-        args.data_path = './datasets/moco-v3/data/INSTRE-S1'
+        args.data_path = '/cmlscratch/gowthami/moco-v3/data/INSTRE-S1'
         from utils import TwoLeveldataset
         dataset_query = TwoLeveldataset(args.data_path,'query' ,transform, 50)
         dataset_values = TwoLeveldataset(args.data_path,'value' ,transform, 50)
 
     elif args.dataset == 'CUB200':
         
-        args.data_path = './datasets/moco-v3/data/CUB_200_2011/images'
+        args.data_path = '/cmlscratch/gowthami/moco-v3/data/CUB_200_2011/images'
         from utils import TwoLeveldataset
         dataset_query = TwoLeveldataset(args.data_path,'query' ,transform)
         dataset_values = TwoLeveldataset(args.data_path,'value' ,transform)
 
     elif args.dataset in ['Copydays']:
 
-        args.data_path = './datasets/moco-v3/data/copydays'
+        args.data_path = '/cmlscratch/gowthami/moco-v3/data/copydays'
         from utils import Copydaysdataset
         dataset_query = Copydaysdataset(args.data_path,'query' ,transform)
         dataset_values = Copydaysdataset(args.data_path,'value' ,transform)
     elif args.dataset == 'Objectnet':
-        args.data_path = './datasets/ObjectNet/objectnet-1.0/images'
+        args.data_path = '/fs/cml-datasets/ObjectNet/objectnet-1.0/images'
         from utils import TwoLeveldataset
         dataset_query = TwoLeveldataset(args.data_path,'query' ,transform,50)
         dataset_values = TwoLeveldataset(args.data_path,'value' ,transform,50)
     elif args.dataset == 'iNat':
-        args.data_path = "./datasets/ret_datasets/iNat_validation"
+        args.data_path = "/fs/cml-projects/adversarial_dbs/ret_datasets/iNat_validation"
         from utils import TwoLeveldataset
         dataset_query = TwoLeveldataset(args.data_path,'query' ,transform, 5)
         dataset_values = TwoLeveldataset(args.data_path,'value' ,transform, 5)
 
     elif args.dataset == 'google_landmark':
-        args.data_path = './datasets/ret_datasets/GoogleLandmarksRet/'
+        args.data_path = '/fs/cml-projects/adversarial_dbs/ret_datasets/GoogleLandmarksRet/'
         from utils import GoogleLMRet
         dataset_query = GoogleLMRet(args.data_path, 'query' ,transform)
         dataset_values =  GoogleLMRet(args.data_path, 'value' ,transform)
@@ -445,7 +482,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # import ipdb; ipdb.set_trace()
         if not args.noeval: 
             import wandb
-            wandb.init(project="bb_retrieval",name=f"{args.pt_style}-{args.arch}")
+            wandb.init(project="bb_retrieval_normalizefix",name=f"{args.pt_style}-{args.arch}")
             wandb.config.update(args)
 
         ############################################################################
